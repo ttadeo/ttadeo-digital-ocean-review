@@ -16,8 +16,8 @@ spec:
     spec:
       containers:
         - name: birthday-reminder-container
-          image: registry.digitalocean.com/ttadeo/birthday-reminder-app:v1
-          imagePullPolicy: IfNotPresent
+          image: registry.digitalocean.com/ttadeo/birthday-reminder-app:v5
+          imagePullPolicy: Always
           ports:
             - containerPort: 30001
           resources:
