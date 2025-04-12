@@ -1,0 +1,189 @@
+
+---
+
+# Resolving Docker Image Architecture Mismatch (Apple Silicon → DigitalOcean Kubernetes)
+
+## Overview
+
+When building Docker containers on a Mac with Apple Silicon (M1/M2), the default architecture is `linux/arm64`. However, DigitalOcean Kubernetes (DOKS) uses nodes based on `linux/amd64`. Attempting to deploy an `arm64` container to an `amd64` cluster results in container crashes with errors like:
+
+```
+exec format error
+```
+
+This guide documents how to resolve this issue by building and pushing a container image with the correct architecture.
+
+---
+
+## 1. The Problem
+
+**Development environment:**
+- MacBook Pro with Apple Silicon (M2)
+- Docker Desktop installed natively (builds default to `linux/arm64`)
+
+**Deployment environment:**
+- DigitalOcean Kubernetes Service (DOKS)
+- Worker nodes run `linux/amd64`
+
+**Symptoms:**
+- Images built and pushed from Mac crash in DOKS pods
+- Pods fail with:
+  - `exec format error`
+  - `CrashLoopBackOff`
+  - `ImagePullBackOff` (in some authorization cases)
+
+---
+
+## 2. Unsuccessful Attempts
+
+- Using `docker buildx build --platform=linux/amd64` on the Mac
+  - Sometimes results in multi-arch or mixed-arch manifest issues
+- Using DigitalOcean App Platform to build and push
+  - Works for App Platform but still causes failures in DOKS
+- Re-pushing from Mac with new tags
+  - Still defaults to ARM-based layers unless carefully overridden
+
+---
+
+## 3. Working Solution: Dedicated `amd64` Docker Builder Container
+
+### Key Idea
+
+Rather than relying on cross-platform emulation from Mac, we run a fully `linux/amd64` environment inside a Docker container to:
+- Build the image
+- Push the image to DigitalOcean Container Registry (DOCR)
+
+---
+
+## 4. Implementation Guide
+
+### Step 1: Create a Debian-based Build Container
+
+**`Dockerfile.builder`:**
+```Dockerfile
+FROM --platform=$TARGETPLATFORM debian:bullseye-slim
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    docker.io \
+    git \
+    bash \
+    build-essential \
+    unzip && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp
+
+# Install doctl
+RUN curl -Lo doctl.tar.gz https://github.com/digitalocean/doctl/releases/download/v1.124.0/doctl-1.124.0-linux-amd64.tar.gz && \
+    tar -xzf doctl.tar.gz && mv doctl /usr/local/bin/
+
+# Install Docker Buildx
+RUN mkdir -p /root/.docker/cli-plugins && \
+    curl -Lo buildx-temp https://github.com/docker/buildx/releases/download/v0.11.2/buildx-v0.11.2.linux-amd64 && \
+    chmod +x buildx-temp && mv buildx-temp /root/.docker/cli-plugins/docker-buildx
+
+WORKDIR /app
+```
+
+Build the image:
+```bash
+docker buildx build \
+  --platform=linux/amd64 \
+  -f Dockerfile.builder \
+  -t birthday-amd64-reminder \
+  --load .
+```
+
+---
+
+### Step 2: Run the Container with Docker Access
+
+Launch the container and allow access to the Docker daemon:
+```bash
+docker run -it \
+  --platform=linux/amd64 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v ~/.docker:/root/.docker \
+  -e DOCKER_HOST=unix:///var/run/docker.sock \
+  birthday-amd64-reminder bash
+```
+
+---
+
+### Step 3: Authenticate with DigitalOcean
+
+Inside the container, run:
+```bash
+doctl auth init
+```
+
+Enter your DigitalOcean Personal Access Token (PAT) when prompted.
+
+---
+
+### Step 4: Build and Push Image from Inside Container
+
+Create a `Dockerfile` for your actual application (or test image).
+
+Example:
+```Dockerfile
+FROM alpine
+CMD ["sh", "-c", "echo 'Hello from DOCR test!' && tail -f /dev/null"]
+```
+
+Build and push:
+```bash
+docker buildx build \
+  --platform linux/amd64 \
+  -t registry.digitalocean.com/ttadeo/test-image:v1 \
+  --push \
+  -f Dockerfile .
+```
+
+---
+
+### Step 5: Deploy to DigitalOcean Kubernetes
+
+Use your Kubernetes YAML deployment file referencing the DOCR image:
+```yaml
+spec:
+  containers:
+    - name: test-image-container
+      image: registry.digitalocean.com/ttadeo/test-image:v1
+```
+
+Deploy:
+```bash
+kubectl apply -f deployment.yaml
+```
+
+Check pod status:
+```bash
+kubectl get pods
+kubectl describe pod <pod-name>
+kubectl logs <pod-name>
+```
+
+---
+
+## 5. Validation
+
+- The image is pulled successfully in DOKS
+- No architecture mismatch occurs
+- Pod logs show expected output
+- No `CrashLoopBackOff` or `exec format error`
+
+---
+
+## 6. Summary
+
+**This guide works because:**
+- The image is built in an actual `linux/amd64` environment
+- DigitalOcean's DOKS nodes require `amd64` containers
+- We eliminated all `arm64` layers and manifest references
+- Buildx ensures correct architecture targeting with `--platform`
+
+**Use this approach any time you're developing on Apple Silicon but deploying to AMD64-based cloud infrastructure.**
+
