@@ -1,4 +1,3 @@
-Absolutely. Here's a clean, professional version of the guide without emojis, using consistent formatting and clear sections for readability. This format is ideal for documentation or internal wikis.
 
 ---
 
@@ -188,4 +187,3 @@ kubectl logs <pod-name>
 
 **Use this approach any time you're developing on Apple Silicon but deploying to AMD64-based cloud infrastructure.**
 
-Let me know when you're ready to repeat this flow with the full birthday app — everything’s in place now.
